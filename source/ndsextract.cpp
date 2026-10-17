@@ -1,6 +1,30 @@
 #include "ndstool.h"
 #include "overlay.h"
 #include <errno.h>
+#ifdef NP3D_LIBRARY
+#include <memory>
+#endif
+
+#ifdef NP3D_LIBRARY
+extern void (*ndsFileVisitor)(const char*, const char*, unsigned int, unsigned int, unsigned int);
+extern void ndsDirectoryCheck(const char*, unsigned int);
+extern void ndsRequire(bool, const char*);
+
+static size_t ReadTable(void *output, size_t size, size_t count, FILE *input)
+{
+	unsigned int position = ftell(input);
+	unsigned int length = size * count;
+	bool in_fnt = position >= header.fnt_offset && position - header.fnt_offset <= header.fnt_size
+		&& length <= header.fnt_size - (position - header.fnt_offset);
+	bool in_fat = position >= header.fat_offset && position - header.fat_offset <= header.fat_size
+		&& length <= header.fat_size - (position - header.fat_offset);
+	ndsRequire(in_fnt || in_fat, "NDS table read outside FNT or FAT");
+	size_t result = fread(output, size, count, input);
+	ndsRequire(result == count, "NDS table is truncated");
+	return result;
+}
+#define fread ReadTable
+#endif
 
 /*
  * MkDir
@@ -37,6 +61,14 @@ void ExtractFile(const char *rootdir, const char *prefix, const char *entry_name
 	fread(&bottom, 1, sizeof(bottom), fNDS);
 	unsigned int size = bottom - top;
 	if (size > (1U << (17 + header.devicecap))) { fprintf(stderr, "File %u: Size is too big. FAT offset 0x%X contains invalid data.\n", file_id, header.fat_offset + 8*file_id); exit(1); }
+
+#ifdef NP3D_LIBRARY
+	if (ndsFileVisitor) {
+		ndsFileVisitor(prefix, entry_name, file_id, top, size);
+		fseek(fNDS, save_filepos, SEEK_SET);
+		return;
+	}
+#endif
 
 	// print file info
 	if (!rootdir || verbose)
@@ -109,7 +141,15 @@ bool MatchName(char *name, char *mask, int level=0)
  */
 void ExtractDirectory(const char *prefix, unsigned int dir_id)
 {
+#ifdef NP3D_LIBRARY
+	ndsDirectoryCheck(prefix, dir_id);
+#endif
+#ifdef NP3D_LIBRARY
+	auto directoryBuffer = std::make_unique<char[]>(MAXPATHLEN);
+	char *strbuf = directoryBuffer.get();
+#else
 	char strbuf[MAXPATHLEN];
+#endif
 	unsigned int save_filepos = ftell(fNDS);
 
 	fseek(fNDS, header.fnt_offset + 8*(dir_id & 0xFFF), SEEK_SET);
@@ -124,7 +164,11 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 
 	// print directory name
 	//printf("%04X ", dir_id);
-	if (!filerootdir || verbose)
+	if ((!filerootdir || verbose)
+#ifdef NP3D_LIBRARY
+		&& !ndsFileVisitor
+#endif
+	)
 	{
 		printf("%s\n", prefix);
 	}
@@ -140,6 +184,9 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 		char entry_name[128];
 		memset(entry_name, 0, 128);
 		fread(entry_name, 1, entry_type_name_length & 127, fNDS);
+#ifdef NP3D_LIBRARY
+		ndsRequire(strlen(prefix) + name_length + 2 <= MAXPATHLEN, "NDS directory path exceeds parser limit");
+#endif
 		if (entry_type_directory)
 		{
 			unsigned_short dir_id;
@@ -157,6 +204,9 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 			strcat(strbuf, entry_name);
 			strcat(strbuf, "/");
 			ExtractDirectory(strbuf, dir_id);
+#ifdef NP3D_LIBRARY
+			if (ndsFileVisitor) file_id--;
+#endif
 		}
 		else
 		{
@@ -186,6 +236,9 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 /*
  * ExtractFiles
  */
+#ifdef NP3D_LIBRARY
+#undef fread
+#endif
 void ExtractFiles(char *ndsfilename)
 {
 //printf("%d\n", MatchName("hello", "h*el*lo")); exit(0);		// TEST
