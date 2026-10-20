@@ -1,14 +1,22 @@
 #include "ndstool.h"
 #include "overlay.h"
 #include <errno.h>
+void ExtractDirectory(const char *prefix, unsigned int dir_id);
 #ifdef NP3D_LIBRARY
 #include <memory>
+#include <string>
+#include <vector>
 #endif
 
 #ifdef NP3D_LIBRARY
 extern void (*ndsFileVisitor)(const char*, const char*, unsigned int, unsigned int, unsigned int);
+extern void (*ndsDirectoryVisitor)(const char*, unsigned int, unsigned int, bool);
 extern void ndsDirectoryCheck(const char*, unsigned int);
 extern void ndsRequire(bool, const char*);
+
+struct DirectoryRequest { std::string prefix; unsigned int id, parent; };
+static std::vector<DirectoryRequest> *directoryRequests;
+static unsigned int currentDirectory, currentParent, directoryCount;
 
 static size_t ReadTable(void *output, size_t size, size_t count, FILE *input)
 {
@@ -139,13 +147,14 @@ bool MatchName(char *name, char *mask, int level=0)
  * ExtractDirectory
  * filerootdir can be 0 for just listing files
  */
-void ExtractDirectory(const char *prefix, unsigned int dir_id)
+static void ExtractDirectoryContents(const char *prefix, unsigned int dir_id)
 {
 #ifdef NP3D_LIBRARY
 	ndsDirectoryCheck(prefix, dir_id);
 #endif
 #ifdef NP3D_LIBRARY
-	auto directoryBuffer = std::make_unique<char[]>(MAXPATHLEN);
+	auto directoryBuffer = std::make_unique<char[]>(ndsDirectoryVisitor
+		? strlen(prefix) + 130 + (filerootdir ? strlen(filerootdir) : 0) : MAXPATHLEN);
 	char *strbuf = directoryBuffer.get();
 #else
 	char strbuf[MAXPATHLEN];
@@ -159,6 +168,18 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 	fread(&top_file_id, 1, sizeof(top_file_id), fNDS);
 	unsigned_short parent_id;	// ID of parent directory or directory count (root)
 	fread(&parent_id, 1, sizeof(parent_id), fNDS);
+#ifdef NP3D_LIBRARY
+	if (ndsDirectoryVisitor)
+	{
+		if (dir_id == 0xf000) directoryCount = parent_id;
+		ndsRequire(directoryCount && directoryCount <= 4096 && directoryCount * 8 <= header.fnt_size,
+			"Invalid FNT directory count");
+		ndsRequire((dir_id & 0xfff) < directoryCount, "FNT directory ID outside table");
+		ndsRequire(entry_start >= directoryCount * 8 && entry_start < header.fnt_size,
+			"FNT directory names overlap or exceed table");
+		ndsDirectoryVisitor(prefix, dir_id, dir_id == 0xf000 ? directoryCount : currentParent, true);
+	}
+#endif
 
 	fseek(fNDS, header.fnt_offset + entry_start, SEEK_SET);
 
@@ -179,13 +200,19 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 		fread(&entry_type_name_length, 1, sizeof(entry_type_name_length), fNDS);
 		unsigned int name_length = entry_type_name_length & 127;
 		bool entry_type_directory = (entry_type_name_length & 128) ? true : false;
-		if (name_length == 0) break;
+		if (name_length == 0) {
+#ifdef NP3D_LIBRARY
+			if (ndsDirectoryVisitor) ndsRequire(!entry_type_directory, "Empty FNT directory name");
+#endif
+			break;
+		}
 	
 		char entry_name[128];
 		memset(entry_name, 0, 128);
 		fread(entry_name, 1, entry_type_name_length & 127, fNDS);
 #ifdef NP3D_LIBRARY
-		ndsRequire(strlen(prefix) + name_length + 2 <= MAXPATHLEN, "NDS directory path exceeds parser limit");
+		if (!ndsDirectoryVisitor) ndsRequire(strlen(prefix) + name_length + 2 <= MAXPATHLEN, "NDS directory path exceeds parser limit");
+		if (ndsDirectoryVisitor) ndsRequire(strlen(entry_name) == name_length, "NDS name contains NUL");
 #endif
 		if (entry_type_directory)
 		{
@@ -230,7 +257,35 @@ void ExtractDirectory(const char *prefix, unsigned int dir_id)
 		}
 	}
 
+#ifdef NP3D_LIBRARY
+	if (ndsDirectoryVisitor) ndsDirectoryVisitor(prefix, dir_id, parent_id, false);
+#endif
 	fseek(fNDS, save_filepos, SEEK_SET);
+}
+
+void ExtractDirectory(const char *prefix, unsigned int dir_id)
+{
+#ifdef NP3D_LIBRARY
+	if (ndsDirectoryVisitor)
+	{
+		if (directoryRequests) {
+			directoryRequests->push_back({prefix, dir_id, currentDirectory});
+			return;
+		}
+		std::vector<DirectoryRequest> requests{{prefix, dir_id, 0}};
+		directoryRequests = &requests;
+		while (!requests.empty()) {
+			auto request = std::move(requests.back());
+			requests.pop_back();
+			currentDirectory = request.id;
+			currentParent = request.parent;
+			ExtractDirectoryContents(request.prefix.c_str(), request.id);
+		}
+		directoryRequests = nullptr;
+		return;
+	}
+#endif
+	ExtractDirectoryContents(prefix, dir_id);
 }
 
 /*

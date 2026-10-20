@@ -7,6 +7,7 @@
 #include "overlay.h"
 #include "loadme.h"
 #include "ndstree.h"
+#include "fnt.h"
 #include "elf.h"
 #include "sha1.h"
 #include "crc.h"
@@ -196,58 +197,22 @@ void AddDirectory(TreeNode *node, const char *prefix, unsigned int this_dir_id, 
 
 	if (verbose) printf("%s\n", prefix);
 
-	// write directory info
-	fseek(fNDS, header.fnt_offset + 8*(this_dir_id & 0xFFF), SEEK_SET);
-	unsigned_int entry_start = _entry_start;	// reference location of entry name
-	fwrite(&entry_start, 1, sizeof(entry_start), fNDS);
 	unsigned int _top_file_id = free_file_id;
-	unsigned_short top_file_id = _top_file_id;	// file ID of top entry
-	fwrite(&top_file_id, 1, sizeof(top_file_id), fNDS);
-	unsigned_short parent_id = _parent_id;	// ID of parent directory or directory count (root)
-	fwrite(&parent_id, 1, sizeof(parent_id), fNDS);
-
-	//printf("dir %X file_id %u +\n", this_dir_id, (int)top_file_id);
-
-	// directory entrynames
+	std::vector<FntName> names;
+	for (TreeNode *t=node; t; t=t->next)
 	{
-		// start of directory entrynames
-		fseek(fNDS, header.fnt_offset + _entry_start, SEEK_SET);
-
-		// write filenames
-		for (TreeNode *t=node; t; t=t->next)
+		if (!t->directory)
 		{
-			if (!t->directory)
-			{
-				int namelen = strlen(t->name);
-				fputc(t->directory ? namelen | 128 : namelen, fNDS); _entry_start += 1;
-				fwrite(t->name, 1, namelen, fNDS); _entry_start += namelen;
-
-				//printf("[ %s -> %u ]\n", t->name, free_file_id);
-
-				free_file_id++;
-			}
+			names.push_back({t->name, (unsigned int)strlen(t->name), 0});
+			free_file_id++;
 		}
-
-		// write directorynames
-		for (TreeNode *t=node; t; t=t->next)
-		{
-			if (t->directory)
-			{
-				//printf("*entry %s\n", t->name);
-
-				int namelen = strlen(t->name);
-				fputc(t->directory ? namelen | 128 : namelen, fNDS); _entry_start += 1;
-				fwrite(t->name, 1, namelen, fNDS); _entry_start += namelen;
-
-				//printf("[ %s -> %X ]\n", t->name, t->dir_id);
-
-				unsigned_short _dir_id_tmp = t->dir_id;
-				fwrite(&_dir_id_tmp, 1, sizeof(_dir_id_tmp), fNDS);
-				_entry_start += sizeof(_dir_id_tmp);
-			}
-		}
-
-		fputc(0, fNDS); _entry_start += 1;	// end of directory entrynames
+	}
+	for (TreeNode *t=node; t; t=t->next)
+		if (t->directory) names.push_back({t->name, (unsigned int)strlen(t->name), (unsigned short)t->dir_id});
+	if (!WriteFntDirectory(fNDS, header.fnt_offset, this_dir_id, _entry_start, _top_file_id, _parent_id, names))
+	{
+		fprintf(stderr, "Cannot write NDS file name table.\n");
+		exit(1);
 	}
 
 	// add files
